@@ -1,0 +1,72 @@
+name: CI — ai-services
+
+on:
+  push:
+    branches: [main, master, develop, "release/*", "feature/*"]
+    paths: ["ai-services/**", ".github/workflows/ci-ai-services.yml"]
+  pull_request:
+    branches: [main, master]
+    paths: ["ai-services/**", ".github/workflows/ci-ai-services.yml"]
+
+env:
+  PYTHON_VERSION: "3.12"
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || 'sk-ant-test-key-not-real' }}
+  APP_ENV: "development"
+
+defaults:
+  run:
+    working-directory: ai-services
+
+jobs:
+  lint:
+    name: "Lint & Type Check"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install ruff mypy bandit
+      - run: ruff check src/ tests/ --output-format=github
+      - run: ruff format --check src/ tests/
+      - run: mypy src/ --ignore-missing-imports --no-error-summary
+      - run: bandit -r src/ -ll
+
+  unit-tests:
+    name: "Unit Tests"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: |
+          pytest tests/ -m "not integration" \
+            --cov=src --cov-report=xml --cov-report=term-missing \
+            --tb=short -v
+      - uses: codecov/codecov-action@v4
+        with: { file: ai-services/coverage.xml, flags: ai-services, fail_ci_if_error: false }
+
+  docker-build:
+    name: "Docker Build"
+    runs-on: ubuntu-22.04
+    needs: [unit-tests, lint]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: ai-services
+          file: ai-services/Dockerfile
+          push: false
+          tags: cloudbank-ai-services:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release-gate:
+    name: "Release Gate"
+    runs-on: ubuntu-22.04
+    needs: [lint, unit-tests]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - run: echo "ai-services — pipeline verde. Listo para deployment."

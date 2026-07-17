@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudbank
+  labels:
+    name: cloudbank
+    security-tier: "financial"

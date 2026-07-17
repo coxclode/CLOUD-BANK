@@ -1,0 +1,188 @@
+# ─── CLOUD BANK — Infraestructura Local de Desarrollo ────────────────────────
+# 3 proyectos independientes (frontend/backend/ai-services), cada uno con su
+# propio Dockerfile. Este compose solo los orquesta para desarrollo local —
+# en producción cada uno se despliega por separado (ver docs/FREE_TIER_ARCHITECTURE.md).
+
+networks:
+  cloudbank:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  jaeger_data:
+
+services:
+
+  # ── Frontend ────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: cloudbank-frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  # ── Backend ─────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cloudbank-backend
+    env_file:
+      - ../backend/.env
+    environment:
+      CLOUDBANK_AI_SERVICES_URL: http://ai-services:8100
+      CLOUDBANK_DATABASE_URL: postgresql://cloudbank:${POSTGRES_PASSWORD:-changeme}@postgres:5432/cloudbank
+      CLOUDBANK_REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      ai-services:
+        condition: service_started
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  # ── ai-services ─────────────────────────────────────────────────────────────
+  ai-services:
+    build:
+      context: ../ai-services
+      dockerfile: Dockerfile
+    container_name: cloudbank-ai-services
+    env_file:
+      - ../ai-services/.env
+    ports:
+      - "8100:8100"
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  # ── PostgreSQL (persistencia del backend) ──────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: cloudbank-postgres
+    environment:
+      POSTGRES_USER: cloudbank
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: cloudbank
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks: [cloudbank]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudbank"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis (rate limiting, cache de API keys) ───────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    container_name: cloudbank-redis
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-changeme}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks: [cloudbank]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: cloudbank-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  # ── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.3.2
+    container_name: cloudbank-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on: [prometheus]
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  # ── Jaeger (Distributed Tracing) ───────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.63.0
+    container_name: cloudbank-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    volumes:
+      - jaeger_data:/badger
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  # ── Mocks de servicios externos (bureau, biometría, AML, etc.) ─────────────
+  mock-credit-bureau:
+    image: mockserver/mockserver:5.15.0
+    container_name: cloudbank-mock-bureau
+    ports: ["9004:1080"]
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  mock-biometric:
+    image: mockserver/mockserver:5.15.0
+    container_name: cloudbank-mock-biometric
+    ports: ["9001:1080"]
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  mock-device:
+    image: mockserver/mockserver:5.15.0
+    container_name: cloudbank-mock-device
+    ports: ["9002:1080"]
+    networks: [cloudbank]
+    restart: unless-stopped
+
+  mock-aml:
+    image: mockserver/mockserver:5.15.0
+    container_name: cloudbank-mock-aml
+    ports: ["9005:1080"]
+    networks: [cloudbank]
+    restart: unless-stopped

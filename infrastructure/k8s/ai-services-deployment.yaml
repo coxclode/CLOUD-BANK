@@ -1,0 +1,95 @@
+---
+# ─── ai-services — servicio interno, sin Ingress, solo accesible desde backend ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-services
+  namespace: cloudbank
+  labels: { app: ai-services, tier: ai }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ai-services }
+  template:
+    metadata:
+      labels: { app: ai-services }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ai-services
+          image: cloudbank/ai-services:1.0
+          imagePullPolicy: Always
+          ports:
+            - { containerPort: 8100, name: http }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - secretRef: { name: cloudbank-ai-services-secrets }
+          env:
+            - { name: APP_ENV, value: "production" }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "1Gi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 8100 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8100 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-services-svc
+  namespace: cloudbank
+spec:
+  selector: { app: ai-services }
+  ports:
+    - { name: http, port: 80, targetPort: 8100 }
+  type: ClusterIP   # Sin LoadBalancer/Ingress — nunca expuesto fuera del cluster
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-services-hpa
+  namespace: cloudbank
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ai-services }
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+
+---
+# Zero Trust: solo el backend puede llamar a ai-services.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-services-netpol
+  namespace: cloudbank
+spec:
+  podSelector:
+    matchLabels: { app: ai-services }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: backend } }
+      ports:
+        - { protocol: TCP, port: 8100 }
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 443 }   # APIs de LLM (Anthropic/OpenAI/Gemini)
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }    # DNS

@@ -1,0 +1,97 @@
+---
+# ─── backend — API pública, único punto que el frontend conoce ───────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: cloudbank
+  labels: { app: backend, tier: backend }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: backend }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: backend }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions: [{ key: app, operator: In, values: [backend] }]
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: backend
+          image: cloudbank/backend:2.0
+          imagePullPolicy: Always
+          ports:
+            - { containerPort: 8000, name: http }
+            - { containerPort: 9090, name: metrics }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - secretRef: { name: cloudbank-backend-secrets }
+          env:
+            - { name: CLOUDBANK_APP_ENVIRONMENT, value: "production" }
+            - { name: CLOUDBANK_AI_SERVICES_URL, value: "http://ai-services-svc.cloudbank.svc.cluster.local" }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          readinessProbe:
+            httpGet: { path: /v1/admin/health/ready, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /v1/admin/health/live, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-svc
+  namespace: cloudbank
+spec:
+  selector: { app: backend }
+  ports:
+    - { name: http, port: 80, targetPort: 8000 }
+    - { name: metrics, port: 9090, targetPort: 9090 }
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: cloudbank
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: backend }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend-pdb
+  namespace: cloudbank
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: backend } }

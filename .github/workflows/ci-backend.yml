@@ -1,0 +1,117 @@
+name: CI — backend
+
+on:
+  push:
+    branches: [main, master, develop, "release/*", "feature/*"]
+    paths: ["backend/**", ".github/workflows/ci-backend.yml"]
+  pull_request:
+    branches: [main, master]
+    paths: ["backend/**", ".github/workflows/ci-backend.yml"]
+
+env:
+  PYTHON_VERSION: "3.12"
+  CLOUDBANK_APP_ENVIRONMENT: "development"
+  CLOUDBANK_SECURITY_ENCRYPTION_KEY: "test-key-32-chars-exactly!!!!"
+  CLOUDBANK_SECURITY_JWT_SECRET: "test-jwt-secret"
+  CLOUDBANK_REDIS_URL: "redis://localhost:6379/0"
+  CLOUDBANK_AI_SERVICES_URL: "http://localhost:8100"
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  lint:
+    name: "Lint & Type Check"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install ruff mypy bandit
+      - run: ruff check src/ tests/ --output-format=github
+      - run: ruff format --check src/ tests/
+      - run: mypy src/ --ignore-missing-imports --no-error-summary
+      - run: bandit -r src/ -ll
+
+  unit-tests:
+    name: "Unit Tests"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: |
+          pytest tests/unit/ \
+            -m "not integration and not e2e" \
+            --cov=src --cov-report=xml --cov-report=term-missing \
+            --tb=short -v
+      - uses: codecov/codecov-action@v4
+        with: { file: backend/coverage.xml, flags: backend, fail_ci_if_error: false }
+
+  integration-tests:
+    name: "Integration Tests"
+    runs-on: ubuntu-22.04
+    needs: unit-tests
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+      postgres:
+        image: postgres:16-alpine
+        ports: ["5432:5432"]
+        env:
+          POSTGRES_USER: cloudbank
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: cloudbank_test
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      CLOUDBANK_DATABASE_URL: "postgresql://cloudbank:test-password@localhost:5432/cloudbank_test"
+      CLOUDBANK_REDIS_URL: "redis://localhost:6379/15"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/integration/ -m integration --tb=short -v
+
+  security-scan:
+    name: "Security Scan"
+    runs-on: ubuntu-22.04
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install pip-audit
+      - run: pip-audit --requirement <(pip freeze) --ignore-vuln PYSEC-2022-42969
+        continue-on-error: true
+
+  docker-build:
+    name: "Docker Build"
+    runs-on: ubuntu-22.04
+    needs: [unit-tests, lint]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: false
+          tags: cloudbank-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release-gate:
+    name: "Release Gate"
+    runs-on: ubuntu-22.04
+    needs: [lint, unit-tests, integration-tests, security-scan]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - run: echo "backend — pipeline verde. Listo para deployment."
